@@ -59,7 +59,7 @@ The following example is the simplest server that reads messages from the client
 It is capable to manage several client connections and listen from 2 differents protocols at same time.
 
 ```rust
-use message_io::events::{EventQueue};
+use message_io::events::{EventQueue, Senderable};
 use message_io::network::{NetworkManager, NetEvent};
 
 use serde::{Serialize, Deserialize};

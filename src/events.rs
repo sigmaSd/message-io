@@ -62,7 +62,7 @@ where E: Send + 'static {
     }
 }
 
-pub trait Sendable<E> {
+pub trait Senderable<E> {
     /// Send instantly an event to the event queue.
     fn send(&self, event: E);
 
@@ -104,7 +104,7 @@ where E: Send + 'static {
     }
 }
 
-impl<E> Sendable<E> for EventSender<E>
+impl<E> Senderable<E> for EventSender<E>
 where E: Send + 'static {
     fn send(&self, event: E) {
         self.sender.send(event).unwrap();
@@ -158,20 +158,20 @@ impl<E> Clone for EventSender<E> {
 
 #[derive(Clone)]
 pub struct MappedEventSender<S, E, F, T>
-where S: Sendable<F> {
-    sendable: S,
+where S: Senderable<F> {
+    senderable: S,
     mapping: T,
     _unused_e: std::marker::PhantomData<E>,
     _unused_f: std::marker::PhantomData<F>,
 }
 
 impl<S, E, F, T> MappedEventSender<S, E, F, T>
-where S: Sendable<F>,
+where S: Senderable<F>,
       F: Send + 'static,
       T: Fn(E) -> F {
-    fn new(sendable: S, mapping: T) -> MappedEventSender<S, E, F, T> {
+    fn new(senderable: S, mapping: T) -> MappedEventSender<S, E, F, T> {
         MappedEventSender {
-            sendable,
+            senderable,
             mapping,
             _unused_e: std::marker::PhantomData,
             _unused_f: std::marker::PhantomData,
@@ -179,20 +179,20 @@ where S: Sendable<F>,
     }
 }
 
-impl<S, E, F, T> Sendable<E> for MappedEventSender<S, E, F, T>
-where S: Sendable<F>,
+impl<S, E, F, T> Senderable<E> for MappedEventSender<S, E, F, T>
+where S: Senderable<F>,
       F: Send + 'static,
       T: Fn(E) -> F {
     fn send(&self, event: E) {
-        self.sendable.send((self.mapping)(event));
+        self.senderable.send((self.mapping)(event));
     }
 
     fn send_with_priority(&self, event: E) {
-        self.sendable.send_with_priority((self.mapping)(event));
+        self.senderable.send_with_priority((self.mapping)(event));
     }
 
     fn send_with_timer(&mut self, event: E, duration: Duration) {
-        self.sendable.send_with_timer((self.mapping)(event), duration)
+        self.senderable.send_with_timer((self.mapping)(event), duration)
     }
 }
 

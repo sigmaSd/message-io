@@ -1,6 +1,6 @@
 use super::common::{Message};
 
-use message_io::events::{EventQueue};
+use message_io::events::{EventQueue, Senderable};
 use message_io::network::{NetworkManager, NetEvent};
 
 enum Event {
