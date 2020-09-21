@@ -83,6 +83,10 @@ where E: Send + 'static {
         }
     }
 
+    pub fn transformation_sender<L, T: Fn(L) -> E>(&mut self, transformation: T) -> LocalEventSender<L, E, T> {
+        LocalEventSender::new(self.clone(), transformation)
+    }
+
     /// Send instantly an event to the event queue.
     pub fn send(&self, event: E) {
         self.sender.send(event).unwrap();
@@ -136,6 +140,44 @@ impl<E> Clone for EventSender<E> {
             timers_running: Arc::new(AtomicBool::new(true)),
             last_timer_id: 0,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct LocalEventSender<E, F, T>
+where T: Fn(E) -> F {
+    event_sender: EventSender<F>,
+    transformation: T,
+    _unused: Option<E>, //FIX_IT: without this, the compiles is not able to detect the E usage.
+}
+
+impl<E, F, T> LocalEventSender<E, F, T>
+where F: Send + 'static,
+      T: Fn(E) -> F {
+    fn new(event_sender: EventSender<F>, transformation: T) -> LocalEventSender<E, F, T> {
+        LocalEventSender {
+            event_sender,
+            transformation,
+            _unused: None,
+        }
+    }
+
+    /// Send instantly an event to the event queue.
+    pub fn send(&self, event: E) {
+        self.event_sender.send((self.transformation)(event));
+    }
+
+    /// Send instantly an event that would be process before any other event sent by the send() method.
+    /// Successive calls to send_with_priority will maintain the order of arrival.
+    pub fn send_with_priority(&self, event: E) {
+        self.event_sender.send_with_priority((self.transformation)(event));
+    }
+
+    /// Send a timed event to the [EventQueue].
+    /// The event only will be sent after the specific duration,
+    /// never before, even it the [EventSender] is dropped.
+    pub fn send_with_timer(&mut self, event: E, duration: Duration) {
+        self.event_sender.send_with_timer((self.transformation)(event), duration)
     }
 }
 
