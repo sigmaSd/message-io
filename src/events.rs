@@ -62,7 +62,7 @@ where E: Send + 'static {
     }
 }
 
-pub trait Senderable<E> : Clone {
+pub trait Senderable<E> : Clone + Sized {
     /// Send instantly an event to the event queue.
     fn send(&self, event: E);
 
