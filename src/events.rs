@@ -62,7 +62,7 @@ where E: Send + 'static {
     }
 }
 
-pub trait Senderable<E> {
+pub trait Senderable<E> : Clone {
     /// Send instantly an event to the event queue.
     fn send(&self, event: E);
 
@@ -99,7 +99,7 @@ where E: Send + 'static {
     /// Create a new sender that maps the value before send to the EventQueue.
     /// This Sender can be used to create event scopes in your application, each of your module
     /// could use its internal typed sender that will be mapped to the EventQueue type.
-    pub fn map<L, T: Fn(L) -> E>(&mut self, mapping: T) -> MappedEventSender<EventSender<E>, L, E, T> {
+    pub fn map<'a, L, T: Fn(L) -> E>(&mut self, mapping: &'a T) -> MappedEventSender<'a, EventSender<E>, L, E, T> {
         MappedEventSender::new(self.clone(), mapping)
     }
 }
@@ -156,20 +156,19 @@ impl<E> Clone for EventSender<E> {
     }
 }
 
-#[derive(Clone)]
-pub struct MappedEventSender<S, E, F, T>
+pub struct MappedEventSender<'a, S, E, F, T>
 where S: Senderable<F> {
     senderable: S,
-    mapping: T,
+    mapping: &'a T,
     _unused_e: std::marker::PhantomData<E>,
     _unused_f: std::marker::PhantomData<F>,
 }
 
-impl<S, E, F, T> MappedEventSender<S, E, F, T>
+impl<'a, S, E, F, T> MappedEventSender<'a, S, E, F, T>
 where S: Senderable<F>,
       F: Send + 'static,
       T: Fn(E) -> F {
-    fn new(senderable: S, mapping: T) -> MappedEventSender<S, E, F, T> {
+    fn new(senderable: S, mapping: &'a T) -> MappedEventSender<'a, S, E, F, T> {
         MappedEventSender {
             senderable,
             mapping,
@@ -179,7 +178,7 @@ where S: Senderable<F>,
     }
 }
 
-impl<S, E, F, T> Senderable<E> for MappedEventSender<S, E, F, T>
+impl<S, E, F, T> Senderable<E> for MappedEventSender<'_, S, E, F, T>
 where S: Senderable<F>,
       F: Send + 'static,
       T: Fn(E) -> F {
@@ -193,6 +192,20 @@ where S: Senderable<F>,
 
     fn send_with_timer(&mut self, event: E, duration: Duration) {
         self.senderable.send_with_timer((self.mapping)(event), duration)
+    }
+}
+
+impl<S, E, F, T> Clone for MappedEventSender<'_, S, E, F, T>
+where S: Senderable<F>,
+      F: Send + 'static,
+      T: Fn(E) -> F {
+    fn clone(&self) -> Self {
+        Self {
+            senderable: self.senderable.clone(),
+            mapping: self.mapping,
+            _unused_e: std::marker::PhantomData,
+            _unused_f: std::marker::PhantomData,
+        }
     }
 }
 
