@@ -176,6 +176,11 @@ where S: Senderable<F>,
             _unused_f: std::marker::PhantomData,
         }
     }
+
+    pub fn map<'b, L, T2: Fn(L) -> E>(&mut self, mapping: &'b T2) -> MappedEventSender<'b, MappedEventSender<'_, S, E, F, T>, L, E, T2>
+    where E: Send + 'static {
+        MappedEventSender::new(self.clone(), mapping)
+    }
 }
 
 impl<S, E, F, T> Senderable<E> for MappedEventSender<'_, S, E, F, T>
