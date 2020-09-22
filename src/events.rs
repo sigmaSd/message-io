@@ -62,7 +62,7 @@ where E: Send + 'static {
     }
 }
 
-pub trait Senderable<E> : Clone + Sized {
+pub trait Senderable<E> {
     /// Send instantly an event to the event queue.
     fn send(&self, event: E);
 
@@ -177,10 +177,12 @@ where S: Senderable<F>,
         }
     }
 
+    /*
     pub fn map<'b, L, T2: Fn(L) -> E>(&mut self, mapping: &'b T2) -> MappedEventSender<'b, MappedEventSender<'_, S, E, F, T>, L, E, T2>
     where E: Send + 'static {
         MappedEventSender::new(self.clone(), mapping)
     }
+    */
 }
 
 impl<S, E, F, T> Senderable<E> for MappedEventSender<'_, S, E, F, T>
@@ -200,6 +202,7 @@ where S: Senderable<F>,
     }
 }
 
+/*
 impl<S, E, F, T> Clone for MappedEventSender<'_, S, E, F, T>
 where S: Senderable<F>,
       F: Send + 'static,
@@ -213,6 +216,7 @@ where S: Senderable<F>,
         }
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {
