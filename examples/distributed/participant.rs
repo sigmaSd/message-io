@@ -25,7 +25,8 @@ impl Participant {
 
         let network_sender = event_queue.sender().clone();
         let mut network =
-            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+                .unwrap();
 
         // A listener for any other participant that want to establish connection.
         let listen_addr = "127.0.0.1:0";
@@ -63,7 +64,7 @@ impl Participant {
             .unwrap();
 
         loop {
-            match self.event_queue.receive() {
+            match self.event_queue.receive().unwrap() {
                 // Waiting events
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(_, message) => match message {

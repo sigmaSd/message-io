@@ -12,7 +12,8 @@ pub fn run() {
 
     let network_sender = event_queue.sender().clone();
     let mut network =
-        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+            .unwrap();
 
     let listen_addr = "127.0.0.1:3000";
     match network.listen_udp(listen_addr) {
@@ -21,7 +22,7 @@ pub fn run() {
     }
 
     loop {
-        match event_queue.receive() {
+        match event_queue.receive().unwrap() {
             Event::Network(net_event) => match net_event {
                 NetEvent::Message(endpoint, message) => match message {
                     Message::Greetings(text) => {

@@ -25,3 +25,4 @@ net2 = "0.2.34"
 #![cfg_attr(test, feature(proc_macro))]
 #[cfg(test)]
 lazy_static = "1.4.0"
+anyhow = "1.0.34"

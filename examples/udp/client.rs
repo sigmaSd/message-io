@@ -15,20 +15,24 @@ pub fn run(name: &str) {
 
     let network_sender = event_queue.sender().clone();
     let mut network =
-        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+            .unwrap();
 
     let server_addr = "127.0.0.1:3000";
     if let Ok(server_id) = network.connect_udp(server_addr) {
         println!("Sending to {} by UDP", server_addr);
-        event_queue.sender().send(Event::Greet);
+        event_queue.sender().send(Event::Greet).unwrap();
 
         loop {
-            match event_queue.receive() {
+            match event_queue.receive().unwrap() {
                 Event::Greet => {
                     network
                         .send(server_id, Message::Greetings(format!("Hi, I am {}", name)))
                         .unwrap();
-                    event_queue.sender().send_with_timer(Event::Greet, Duration::from_secs(1));
+                    event_queue
+                        .sender()
+                        .send_with_timer(Event::Greet, Duration::from_secs(1))
+                        .unwrap();
                 }
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(_, message) => match message {

@@ -22,7 +22,8 @@ fn main() {
     let mut event_queue = EventQueue::new();
 
     let sender = event_queue.sender().clone();
-    let mut network = NetworkManager::new(move |net_event| sender.send(Event::Network(net_event)));
+    let mut network =
+        NetworkManager::new(move |net_event| sender.send(Event::Network(net_event))).unwrap();
 
     let addr = "239.255.0.1:3010";
     network
@@ -35,7 +36,7 @@ fn main() {
     network.listen_udp_multicast(addr).unwrap();
 
     loop {
-        match event_queue.receive() {
+        match event_queue.receive().unwrap() {
             Event::Network(net_event) => match net_event {
                 NetEvent::Message(_, message) => match message {
                     Message::HelloLan(name) => println!("{} greets to the network!", name),

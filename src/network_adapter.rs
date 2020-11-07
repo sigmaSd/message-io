@@ -1,5 +1,6 @@
 use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::{event, Poll, Interest, Token, Events, Registry};
+use anyhow::{Result, Context};
 
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, TcpStream as StdTcpStream};
 use net2::{UdpBuilder};
@@ -62,21 +63,18 @@ impl Listener {
         UdpSocket::bind(addr).map(Listener::Udp)
     }
 
-    pub fn new_udp_multicast(addr: SocketAddrV4) -> io::Result<Listener> {
+    pub fn new_udp_multicast(addr: SocketAddrV4) -> Result<Listener> {
         let listening_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, addr.port());
-        UdpBuilder::new_v4().unwrap().reuse_address(true).unwrap().bind(listening_addr).map(
-            |socket| {
-                socket.set_nonblocking(true).unwrap();
-                socket.join_multicast_v4(&addr.ip(), &Ipv4Addr::UNSPECIFIED).unwrap();
-                Listener::Udp(UdpSocket::from_std(socket))
-            },
-        )
+        let socket = UdpBuilder::new_v4()?.reuse_address(true)?.bind(listening_addr)?;
+        socket.set_nonblocking(true)?;
+        socket.join_multicast_v4(&addr.ip(), &Ipv4Addr::UNSPECIFIED)?;
+        Ok(Listener::Udp(UdpSocket::from_std(socket)))
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
+    pub fn local_addr(&self) -> Result<SocketAddr> {
         match self {
-            Listener::Tcp(listener) => listener.local_addr().unwrap(),
-            Listener::Udp(socket) => socket.local_addr().unwrap(),
+            Listener::Tcp(listener) => Ok(listener.local_addr()?),
+            Listener::Udp(socket) => Ok(socket.local_addr()?),
         }
     }
 
@@ -90,6 +88,7 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        // unwrap in drop
         if let Listener::Udp(socket) = self {
             if let SocketAddr::V4(addr) = socket.local_addr().unwrap() {
                 if addr.ip().is_multicast() {
@@ -106,32 +105,30 @@ pub enum Remote {
 }
 
 impl Remote {
-    pub fn new_tcp(addr: SocketAddr) -> io::Result<Remote> {
+    pub fn new_tcp(addr: SocketAddr) -> Result<Remote> {
         // Create a standard TcpStream to blocking until the connection is reached.
-        StdTcpStream::connect(addr).map(|stream| {
-            stream.set_nonblocking(true).unwrap();
-            Remote::Tcp(TcpStream::from_std(stream))
-        })
+        let stream = StdTcpStream::connect(addr)?;
+        stream.set_nonblocking(true)?;
+        Ok(Remote::Tcp(TcpStream::from_std(stream)))
     }
 
-    pub fn new_udp(addr: SocketAddr) -> io::Result<Remote> {
-        UdpSocket::bind("0.0.0.0:0".parse().unwrap()).map(|socket| {
-            socket.connect(addr).unwrap();
-            Remote::Udp(socket, addr)
-        })
+    pub fn new_udp(addr: SocketAddr) -> Result<Remote> {
+        let socket = UdpSocket::bind("0.0.0.0:0".parse()?)?;
+        socket.connect(addr)?;
+        Ok(Remote::Udp(socket, addr))
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
+    pub fn local_addr(&self) -> Result<SocketAddr> {
         match self {
-            Remote::Tcp(stream) => stream.local_addr().unwrap(),
-            Remote::Udp(socket, _) => socket.local_addr().unwrap(),
+            Remote::Tcp(stream) => Ok(stream.local_addr()?),
+            Remote::Udp(socket, _) => Ok(socket.local_addr()?),
         }
     }
 
-    pub fn peer_addr(&self) -> SocketAddr {
+    pub fn peer_addr(&self) -> Result<SocketAddr> {
         match self {
-            Remote::Tcp(stream) => stream.peer_addr().unwrap(),
-            Remote::Udp(_, addr) => *addr,
+            Remote::Tcp(stream) => Ok(stream.peer_addr()?),
+            Remote::Udp(_, addr) => Ok(*addr),
         }
     }
 
@@ -156,7 +153,7 @@ impl Resource {
         }
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
+    pub fn local_addr(&self) -> Result<SocketAddr> {
         match self {
             Resource::Listener(listener) => listener.local_addr(),
             Resource::Remote(remote) => remote.local_addr(),
@@ -180,11 +177,11 @@ impl std::fmt::Display for Resource {
     }
 }
 
-pub fn adapter() -> (Arc<Mutex<Controller>>, Receiver) {
-    let poll = Poll::new().unwrap();
-    let controller = Controller::new(poll.registry().try_clone().unwrap());
+pub fn adapter() -> Result<(Arc<Mutex<Controller>>, Receiver)> {
+    let poll = Poll::new()?;
+    let controller = Controller::new(poll.registry().try_clone()?);
     let thread_safe_controller = Arc::new(Mutex::new(controller));
-    (thread_safe_controller.clone(), Receiver::new(thread_safe_controller, poll))
+    Ok((thread_safe_controller.clone(), Receiver::new(thread_safe_controller, poll)))
 }
 
 pub struct Controller {
@@ -198,49 +195,50 @@ impl Controller {
         Controller { resources: HashMap::new(), last_id: 0, registry }
     }
 
-    fn add_resource<S: event::Source + ?Sized>(&mut self, source: &mut S) -> usize {
+    fn add_resource<S: event::Source + ?Sized>(&mut self, source: &mut S) -> Result<usize> {
         let id = self.last_id;
         self.last_id += 1;
-        self.registry.register(source, Token(id), Interest::READABLE).unwrap();
-        id
+        self.registry.register(source, Token(id), Interest::READABLE)?;
+        Ok(id)
     }
 
-    pub fn add_remote(&mut self, mut remote: Remote) -> Endpoint {
-        let id = self.add_resource(remote.event_source());
-        let endpoint = Endpoint::new(id, remote.peer_addr());
+    pub fn add_remote(&mut self, mut remote: Remote) -> Result<Endpoint> {
+        let id = self.add_resource(remote.event_source())?;
+        let peer_addr = remote.peer_addr()?;
+        let endpoint = Endpoint::new(id, peer_addr);
         self.resources.insert(id, Resource::Remote(remote));
-        endpoint
+        Ok(endpoint)
     }
 
-    pub fn add_listener(&mut self, mut listener: Listener) -> (usize, SocketAddr) {
-        let id = self.add_resource(listener.event_source());
+    pub fn add_listener(&mut self, mut listener: Listener) -> Result<(usize, SocketAddr)> {
+        let id = self.add_resource(listener.event_source())?;
         let local_addr = listener.local_addr();
         self.resources.insert(id, Resource::Listener(listener));
-        (id, local_addr)
+        Ok((id, local_addr?))
     }
 
-    pub fn remove_resource(&mut self, resource_id: usize) -> Option<()> {
+    pub fn remove_resource(&mut self, resource_id: usize) -> Result<()> {
         if let Some(mut resource) = self.resources.remove(&resource_id) {
-            self.registry.deregister(resource.event_source()).unwrap();
-            Some(())
+            self.registry.deregister(resource.event_source())?;
         }
-        else {
-            None
-        }
+        Ok(())
     }
 
     pub fn local_address(&mut self, resource_id: usize) -> Option<SocketAddr> {
         if let Some(resource) = self.resources.get(&resource_id) {
-            Some(resource.local_addr())
+            if let Ok(addr) = resource.local_addr() {
+                return Some(addr)
+            }
         }
-        else {
-            None
-        }
+        None
     }
 
     pub fn send(&mut self, endpoint: Endpoint, data: &[u8]) -> io::Result<()> {
         if let Some(resource) = self.resources.get_mut(&endpoint.resource_id()) {
             match resource {
+                // note with map we're ignoring the number of bytes sent/written
+                // is this the desired behavior?
+                // for example what about write_all
                 Resource::Listener(listener) => match listener {
                     Listener::Udp(socket) => socket.send_to(data, endpoint.addr()).map(|_| ()),
                     _ => unreachable!(),
@@ -279,28 +277,33 @@ impl<'a> Receiver {
         input_buffer: &mut [u8],
         timeout: Option<Duration>,
         event_callback: C,
-    ) where
-        C: for<'b> FnMut(Endpoint, Event<'b>),
+    ) -> Result<()>
+    where
+        C: for<'b> FnMut(Endpoint, Event<'b>) -> Result<()>,
     {
         loop {
             match self.poll.poll(&mut self.events, timeout) {
                 Ok(_) => break self.process_event(input_buffer, event_callback),
                 Err(e) => match e.kind() {
                     ErrorKind::Interrupted => continue,
-                    _ => Err(e).unwrap(),
+                    _ => break Err(e.into()),
                 },
             }
         }
     }
 
-    fn process_event<C>(&mut self, input_buffer: &mut [u8], mut event_callback: C)
-    where C: for<'b> FnMut(Endpoint, Event<'b>) {
+    fn process_event<C>(&mut self, input_buffer: &mut [u8], mut event_callback: C) -> Result<()>
+    where C: for<'b> FnMut(Endpoint, Event<'b>) -> Result<()> {
         for mio_event in &self.events {
             let token = mio_event.token();
             let id = token.0;
+            // mutex lock
             let mut controller = self.controller.lock().unwrap();
 
-            let resource = controller.resources.get_mut(&id).unwrap();
+            let resource = controller
+                .resources
+                .get_mut(&id)
+                .context(format!("cannot find resource id: {} in controller", id))?;
             log::trace!("Wake from poll for endpoint {}. Resource: {}", id, resource);
             match resource {
                 Resource::Listener(listener) => match listener {
@@ -309,10 +312,11 @@ impl<'a> Receiver {
                         loop {
                             match listener.accept() {
                                 Ok((stream, _)) => {
-                                    let endpoint = controller.add_remote(Remote::Tcp(stream));
-                                    event_callback(endpoint, Event::Connection);
+                                    let endpoint = controller.add_remote(Remote::Tcp(stream))?;
+                                    event_callback(endpoint, Event::Connection)?;
 
                                     // Used to avoid the consecutive mutable borrows
+                                    // safe unwrap we already checked id above
                                     listener = match controller.resources.get_mut(&id).unwrap() {
                                         Resource::Listener(Listener::Tcp(listener)) => listener,
                                         _ => unreachable!(),
@@ -322,18 +326,20 @@ impl<'a> Receiver {
                                 Err(ref err) if err.kind() == io::ErrorKind::Interrupted => {
                                     continue
                                 }
-                                Err(err) => Err(err).unwrap(),
+                                Err(err) => return Err(err.into()),
                             }
                         }
                     }
                     Listener::Udp(socket) => loop {
                         match socket.recv_from(input_buffer) {
-                            Ok((size, addr)) => event_callback(
-                                Endpoint::new(id, addr),
-                                Event::Data(&input_buffer[..size]),
-                            ),
+                            Ok((size, addr)) => {
+                                event_callback(
+                                    Endpoint::new(id, addr),
+                                    Event::Data(&input_buffer[..size]),
+                                )?;
+                            }
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(err) => Err(err).unwrap(),
+                            Err(err) => return Err(err.into()),
                         }
                     },
                 },
@@ -341,35 +347,38 @@ impl<'a> Receiver {
                     Remote::Tcp(stream) => loop {
                         match stream.read(input_buffer) {
                             Ok(0) => {
-                                let endpoint = Endpoint::new(id, stream.peer_addr().unwrap());
-                                controller.remove_resource(endpoint.resource_id()).unwrap();
-                                event_callback(endpoint, Event::Disconnection);
+                                let endpoint = Endpoint::new(id, stream.peer_addr()?);
+                                controller.remove_resource(endpoint.resource_id())?;
+                                event_callback(endpoint, Event::Disconnection)?;
                                 break
                             }
                             Ok(size) => {
-                                let endpoint = Endpoint::new(id, stream.peer_addr().unwrap());
-                                event_callback(endpoint, Event::Data(&input_buffer[..size]));
+                                let endpoint = Endpoint::new(id, stream.peer_addr()?);
+                                event_callback(endpoint, Event::Data(&input_buffer[..size]))?;
                             }
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
                             Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(err) => Err(err).unwrap(),
+                            Err(err) => return Err(err.into()),
                         }
                     },
                     Remote::Udp(socket, addr) => loop {
                         match socket.recv(input_buffer) {
-                            Ok(size) => event_callback(
-                                Endpoint::new(id, *addr),
-                                Event::Data(&input_buffer[..size]),
-                            ),
+                            Ok(size) => {
+                                event_callback(
+                                    Endpoint::new(id, *addr),
+                                    Event::Data(&input_buffer[..size]),
+                                )?;
+                            }
                             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
                             Err(ref err) if err.kind() == io::ErrorKind::ConnectionRefused => {
                                 continue
                             }
-                            Err(err) => Err(err).unwrap(),
+                            Err(err) => return Err(err.into()),
                         }
                     },
                 },
             }
         }
+        Ok(())
     }
 }

@@ -7,6 +7,7 @@ use std::sync::{
 use std::time::Duration;
 use std::thread::{self, JoinHandle};
 use std::collections::{HashMap};
+use anyhow::{anyhow, Result};
 
 const TIMER_SAMPLING_CHECK: u64 = 50; //ms
 
@@ -37,29 +38,29 @@ where E: Send + 'static
     }
 
     /// Blocks the current thread until an event is received by this queue.
-    pub fn receive(&mut self) -> E {
+    pub fn receive(&mut self) -> Result<E> {
         if !self.priority_receiver.is_empty() {
-            self.priority_receiver.recv().unwrap()
+            Ok(self.priority_receiver.recv()?)
         }
         else {
             select! {
-                recv(self.receiver) -> event => event.unwrap(),
-                recv(self.priority_receiver) -> event => event.unwrap(),
+                recv(self.receiver) -> event => Ok(event?),
+                recv(self.priority_receiver) -> event => Ok(event?),
             }
         }
     }
 
     /// Blocks the current thread until an event is received by this queue or timeout is exceeded.
     /// If timeout is reached a None is returned, otherwise the event is returned.
-    pub fn receive_event_timeout(&mut self, timeout: Duration) -> Option<E> {
+    pub fn receive_event_timeout(&mut self, timeout: Duration) -> Result<Option<E>> {
         if !self.priority_receiver.is_empty() {
-            Some(self.priority_receiver.recv().unwrap())
+            Ok(Some(self.priority_receiver.recv()?))
         }
         else {
             select! {
-                recv(self.receiver) -> event => Some(event.unwrap()),
-                recv(self.priority_receiver) -> event => Some(event.unwrap()),
-                default(timeout) => None
+                recv(self.receiver) -> event => Ok(Some(event?)),
+                recv(self.priority_receiver) -> event => Ok(Some(event?)),
+                default(timeout) => Ok(None)
             }
         }
     }
@@ -95,28 +96,31 @@ where E: Send + 'static
     }
 
     /// Send instantly an event to the event queue.
-    pub fn send(&self, event: E) {
-        self.sender.send(event).unwrap();
+    pub fn send(&self, event: E) -> Result<()> {
+        // crossbeam error is not Send
+        self.sender.send(event).map_err(|_| anyhow!("failed to send event through crossbeam"))
     }
 
     /// Send instantly an event that would be process before any other event sent by the send() method.
     /// Successive calls to send_with_priority will maintain the order of arrival.
-    pub fn send_with_priority(&self, event: E) {
-        self.priority_sender.send(event).unwrap();
+    pub fn send_with_priority(&self, event: E) -> Result<()> {
+        // crossbeam error is not Send
+        self.priority_sender
+            .send(event)
+            .map_err(|_| anyhow!("failed to send event through crossbeam"))
     }
 
     /// Send a timed event to the [EventQueue].
     /// The event only will be sent after the specific duration,
     /// never before, even it the [EventSender] is dropped.
-    pub fn send_with_timer(&mut self, event: E, duration: Duration) {
+    pub fn send_with_timer(&mut self, event: E, duration: Duration) -> Result<()> {
         let sender = self.sender.clone();
         let timer_id = self.last_timer_id;
         let running = self.timers_running.clone();
         let mut time_acc = Duration::from_secs(0);
         let duration_step = Duration::from_millis(TIMER_SAMPLING_CHECK);
-        let timer_handle = thread::Builder::new()
-            .name("message-io: timer".into())
-            .spawn(move || {
+        let timer_handle =
+            thread::Builder::new().name("message-io: timer".into()).spawn(move || {
                 while time_acc < duration {
                     thread::sleep(duration_step);
                     time_acc += duration_step;
@@ -124,15 +128,18 @@ where E: Send + 'static
                         return
                     }
                 }
-                sender.send(event).unwrap();
-            })
-            .unwrap();
+                if let Err(_e) = sender.send(event) {
+                    // how to handle e
+                }
+            })?;
         self.timer_registry.insert(timer_id, timer_handle);
         self.last_timer_id += 1;
+        Ok(())
     }
 }
 
 impl<E> Drop for EventSender<E> {
+    //unwrap in drop
     fn drop(&mut self) {
         self.timers_running.store(false, Ordering::Relaxed);
         for (_, timer) in self.timer_registry.drain() {
@@ -170,55 +177,58 @@ mod tests {
     #[test]
     fn waiting_timer_event() {
         let mut queue = EventQueue::new();
-        queue.sender().send_with_timer("Timed", *TIMER_TIME);
-        assert_eq!(queue.receive_event_timeout(*TIMEOUT).unwrap(), "Timed");
+        queue.sender().send_with_timer("Timed", *TIMER_TIME).unwrap();
+        assert_eq!(queue.receive_event_timeout(*TIMEOUT).unwrap().unwrap(), "Timed");
     }
 
     #[test]
     fn standard_events_order() {
         let mut queue = EventQueue::new();
-        queue.sender().send("first");
-        queue.sender().send("second");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "first");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "second");
+        queue.sender().send("first").unwrap();
+        queue.sender().send("second").unwrap();
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "first");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "second");
     }
 
     #[test]
     fn priority_events_order() {
         let mut queue = EventQueue::new();
-        queue.sender().send("standard");
-        queue.sender().send_with_priority("priority_first");
-        queue.sender().send_with_priority("priority_second");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "priority_first");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "priority_second");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "standard");
+        queue.sender().send("standard").unwrap();
+        queue.sender().send_with_priority("priority_first").unwrap();
+        queue.sender().send_with_priority("priority_second").unwrap();
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "priority_first");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "priority_second");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "standard");
     }
 
     #[test]
     fn timer_events_order() {
         let mut queue = EventQueue::new();
-        queue.sender().send_with_timer("timed", Duration::from_millis(TIMER_SAMPLING_CHECK));
-        queue.sender().send("standard_first");
-        queue.sender().send("standard_second");
+        queue
+            .sender()
+            .send_with_timer("timed", Duration::from_millis(TIMER_SAMPLING_CHECK))
+            .unwrap();
+        queue.sender().send("standard_first").unwrap();
+        queue.sender().send("standard_second").unwrap();
 
         std::thread::sleep(*TIMEOUT);
         // The timed event has been received at this point
 
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "standard_first");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "standard_second");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "timed");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "standard_first");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "standard_second");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "timed");
     }
 
     #[test]
     fn priority_and_time_events_order() {
         let mut queue = EventQueue::new();
-        queue.sender().send_with_timer("timed", *TIMER_TIME);
-        queue.sender().send_with_priority("priority");
+        queue.sender().send_with_timer("timed", *TIMER_TIME).unwrap();
+        queue.sender().send_with_priority("priority").unwrap();
 
         std::thread::sleep(*TIMEOUT);
         // The timed event has been received at this point
 
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "priority");
-        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap(), "timed");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "priority");
+        assert_eq!(queue.receive_event_timeout(*ZERO_MS).unwrap().unwrap(), "timed");
     }
 }

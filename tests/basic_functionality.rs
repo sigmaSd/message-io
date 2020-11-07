@@ -19,7 +19,8 @@ fn simple_connection_data_disconnection_by_tcp() {
     let mut event_queue = EventQueue::new();
     let network_sender = event_queue.sender().clone();
     let mut network =
-        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+            .unwrap();
 
     let mut client_endpoint = None;
 
@@ -27,7 +28,7 @@ fn simple_connection_data_disconnection_by_tcp() {
 
     let server_handle = std::thread::spawn(move || {
         loop {
-            match event_queue.receive() {
+            match event_queue.receive().unwrap() {
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(endpoint, message) => match message {
                         Message::Data(text) => {
@@ -53,12 +54,13 @@ fn simple_connection_data_disconnection_by_tcp() {
         let mut event_queue = EventQueue::new();
         let network_sender = event_queue.sender().clone();
         let mut network =
-            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+                .unwrap();
 
         let server_endpoint = network.connect_tcp(server_addr).unwrap();
         network.send(server_endpoint, Message::Data(MESSAGE_DATA.into())).unwrap();
         loop {
-            match event_queue.receive() {
+            match event_queue.receive().unwrap() {
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(endpoint, message) => match message {
                         Message::Data(text) => {
@@ -88,13 +90,14 @@ fn simple_data_by_udp() {
     let mut event_queue = EventQueue::new();
     let network_sender = event_queue.sender().clone();
     let mut network =
-        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+            .unwrap();
 
     let (upd_listen_resource_id, server_addr) = network.listen_udp("127.0.0.1:0").unwrap();
 
     let server_handle = std::thread::spawn(move || {
         loop {
-            match event_queue.receive() {
+            match event_queue.receive().unwrap() {
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(endpoint, message) => match message {
                         Message::Data(text) => {
@@ -115,12 +118,13 @@ fn simple_data_by_udp() {
         let mut event_queue = EventQueue::new();
         let network_sender = event_queue.sender().clone();
         let mut network =
-            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+            NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+                .unwrap();
 
         let server_endpoint = network.connect_udp(server_addr).unwrap();
         network.send(server_endpoint, Message::Data(MESSAGE_DATA.into())).unwrap();
         loop {
-            match event_queue.receive() {
+            match event_queue.receive().unwrap() {
                 Event::Network(net_event) => match net_event {
                     NetEvent::Message(endpoint, message) => match message {
                         Message::Data(text) => {

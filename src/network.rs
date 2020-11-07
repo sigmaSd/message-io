@@ -1,6 +1,7 @@
 use crate::network_adapter::{self, Controller, Listener, Remote};
 use crate::encoding::{self, DecodingPool};
 
+use anyhow::{Result, Context, bail};
 use serde::{Serialize, Deserialize};
 
 use std::sync::{
@@ -50,12 +51,12 @@ pub struct NetworkManager {
 impl<'a> NetworkManager {
     /// Creates a new [NetworkManager].
     /// The user must register an event_callback that can be called each time the network generate and [NetEvent]
-    pub fn new<InMessage, C>(event_callback: C) -> NetworkManager
+    pub fn new<InMessage, C>(event_callback: C) -> Result<NetworkManager>
     where
         InMessage: for<'b> Deserialize<'b> + Send + 'static,
-        C: Fn(NetEvent<InMessage>) + Send + 'static,
+        C: Fn(NetEvent<InMessage>) -> Result<()> + Send + 'static,
     {
-        let (network_controller, mut network_receiver) = network_adapter::adapter();
+        let (network_controller, mut network_receiver) = network_adapter::adapter()?;
 
         let network_thread_running = Arc::new(AtomicBool::new(true));
         let running = network_thread_running.clone();
@@ -67,7 +68,7 @@ impl<'a> NetworkManager {
                 let mut decoding_pool = DecodingPool::new();
                 let timeout = Duration::from_millis(NETWORK_SAMPLING_TIMEOUT);
                 while running.load(Ordering::Relaxed) {
-                    network_receiver.receive(
+                    if let Err(_e) = network_receiver.receive(
                         &mut input_buffer[..],
                         Some(timeout),
                         |endpoint, event| {
@@ -76,19 +77,22 @@ impl<'a> NetworkManager {
                                 endpoint,
                                 event,
                                 &mut decoding_pool,
-                            );
+                            )
                         },
-                    );
+                    ) {
+                        // Note:!! what to with this error?
+                        // Somehow send it to the user?
+                    }
                 }
             })
-            .unwrap();
+            .context("failed to build network thread")?;
 
-        NetworkManager {
+        Ok(NetworkManager {
             network_event_thread: Some(network_event_thread),
             network_thread_running,
             network_controller,
             output_buffer: Vec::new(),
-        }
+        })
     }
 
     fn process_network_event<'c, InMessage, C>(
@@ -96,62 +100,85 @@ impl<'a> NetworkManager {
         endpoint: Endpoint,
         event: network_adapter::Event<'c>,
         decoding_pool: &mut DecodingPool<Endpoint>,
-    ) where
+    ) -> Result<()>
+    where
         InMessage: for<'b> Deserialize<'b> + Send + 'static,
-        C: Fn(NetEvent<InMessage>) + Send + 'static,
+        C: Fn(NetEvent<InMessage>) -> Result<()> + Send + 'static,
     {
         match event {
             network_adapter::Event::Connection => {
                 log::trace!("Connected endpoint {}", endpoint);
-                event_callback(NetEvent::AddedEndpoint(endpoint));
+                event_callback(NetEvent::AddedEndpoint(endpoint))?;
             }
             network_adapter::Event::Data(data) => {
                 log::trace!("Data received from {}, {} bytes", endpoint, data.len());
                 decoding_pool.decode_from(data, endpoint, |decoded_data| {
                     log::trace!("Message received from {}, {} bytes", endpoint, decoded_data.len());
-                    let message: InMessage = bincode::deserialize(decoded_data).unwrap();
-                    event_callback(NetEvent::Message(endpoint, message));
-                });
+                    let message: InMessage = bincode::deserialize(decoded_data)?;
+                    event_callback(NetEvent::Message(endpoint, message))?;
+                    Ok(())
+                })?;
             }
             network_adapter::Event::Disconnection => {
                 log::trace!("Disconnected endpoint {}", endpoint);
-                event_callback(NetEvent::RemovedEndpoint(endpoint));
+                event_callback(NetEvent::RemovedEndpoint(endpoint))?;
             }
-        };
+        }
+        Ok(())
     }
 
     /// Creates a connection to the specific address by TCP.
     /// The endpoint, an identified of the new connection, will be returned.
     /// If the connection can not be performed (e.g. the address is not reached) an error is returned.
-    pub fn connect_tcp<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<Endpoint> {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-        Remote::new_tcp(addr)
-            .map(|remote| self.network_controller.lock().unwrap().add_remote(remote))
+    pub fn connect_tcp<A: ToSocketAddrs>(&mut self, addr: A) -> Result<Endpoint> {
+        let addr = addr
+            .to_socket_addrs()
+            .context("failed to resolve socket addrs")?
+            .next()
+            .context("addr was empty?")?;
+        // mutex lock unwrap
+        Ok(Remote::new_tcp(addr)
+            .map(|remote| self.network_controller.lock().unwrap().add_remote(remote))??)
     }
 
     /// Creates a connection to the specific address by UDP.
     /// The endpoint, an identified of the new connection, will be returned.
     /// If there is an error during the socket creation, an error will be returned.
-    pub fn connect_udp<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<Endpoint> {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-        Remote::new_udp(addr)
-            .map(|remote| self.network_controller.lock().unwrap().add_remote(remote))
+    pub fn connect_udp<A: ToSocketAddrs>(&mut self, addr: A) -> Result<Endpoint> {
+        let addr = addr
+            .to_socket_addrs()
+            .context("failed to resolve socket addrs")?
+            .next()
+            .context("addr was empty?")?;
+        // mutex lock unwrap
+        Ok(Remote::new_udp(addr)
+            .map(|remote| self.network_controller.lock().unwrap().add_remote(remote))??)
     }
 
     /// Open a port to listen messages from TCP.
     /// If the port can be opened, an resource id identifying the listener is returned along with the local address, or an error if not.
-    pub fn listen_tcp<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<(usize, SocketAddr)> {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
+    pub fn listen_tcp<A: ToSocketAddrs>(&mut self, addr: A) -> Result<(usize, SocketAddr)> {
+        let addr = addr
+            .to_socket_addrs()
+            .context("failed to resolve socket addrs")?
+            .next()
+            .context("addr was empty?")?;
+        // mutex unwrap
         Listener::new_tcp(addr)
-            .map(|listener| self.network_controller.lock().unwrap().add_listener(listener))
+            .map(|listener| self.network_controller.lock().unwrap().add_listener(listener))?
     }
 
     /// Open a port to listen messages from UDP.
     /// If the port can be opened, an resource id identifying the listener is returned along with the local address, or an error if not.
-    pub fn listen_udp<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<(usize, SocketAddr)> {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
+    pub fn listen_udp<A: ToSocketAddrs>(&mut self, addr: A) -> Result<(usize, SocketAddr)> {
+        let addr = addr
+            .to_socket_addrs()
+            .context("failed to resolve socket addrs")?
+            .next()
+            .context("addr was empty?")?;
+        // mutex unwrap
         Listener::new_udp(addr)
-            .map(|listener| self.network_controller.lock().unwrap().add_listener(listener))
+            .map(|listener| self.network_controller.lock().unwrap().add_listener(listener))?
     }
 
     /// Open a port to listen messages from UDP in multicast.
@@ -160,12 +187,18 @@ impl<'a> NetworkManager {
     pub fn listen_udp_multicast<A: ToSocketAddrs>(
         &mut self,
         addr: A,
-    ) -> io::Result<(usize, SocketAddr)>
+    ) -> Result<(usize, SocketAddr)>
     {
-        match addr.to_socket_addrs().unwrap().next().unwrap() {
+        //mutex lock unwrap
+        match addr
+            .to_socket_addrs()
+            .context("failed to resolve socket addrs")?
+            .next()
+            .context("addr was empty?")?
+        {
             SocketAddr::V4(addr) => Listener::new_udp_multicast(addr)
-                .map(|listener| self.network_controller.lock().unwrap().add_listener(listener)),
-            _ => panic!("listening for udp multicast is only supported for ipv4 addresses"),
+                .map(|listener| self.network_controller.lock().unwrap().add_listener(listener))?,
+            _ => bail!("listening for udp multicast is only supported for ipv4 addresses"),
         }
     }
 
@@ -175,7 +208,8 @@ impl<'a> NetworkManager {
     /// Resources of endpoints generated by a TcpListener can also be removed to close the connection.
     /// Note: Udp endpoints generated by a UdpListener shared the resource, the own UdpListener.
     /// This means that there is no resource to remove as the TCP case.
-    pub fn remove_resource(&mut self, resource_id: usize) -> Option<()> {
+    pub fn remove_resource(&mut self, resource_id: usize) -> Result<()> {
+        //mutex lock unwrap
         self.network_controller.lock().unwrap().remove_resource(resource_id)
     }
 
@@ -183,21 +217,23 @@ impl<'a> NetworkManager {
     /// Returns `None` if the endpoint id not exists.
     /// Note: Udp endpoints generated by a UdpListener shared the resource.
     pub fn local_address(&self, resource_id: usize) -> Option<SocketAddr> {
+        //mutex lock unwrap
         self.network_controller.lock().unwrap().local_address(resource_id)
     }
 
     /// Serialize and send the message thought the connection represented by the given endpoint.
     /// If the same message should be sent to different endpoints, use `send_all()` to better performance.
     /// Returns an error if there is an error while sending the message, the endpoint does not exists, or if it is not valid.
-    pub fn send<OutMessage>(&mut self, endpoint: Endpoint, message: OutMessage) -> io::Result<()>
+    pub fn send<OutMessage>(&mut self, endpoint: Endpoint, message: OutMessage) -> Result<()>
     where OutMessage: Serialize {
-        self.prepare_output_message(message);
+        self.prepare_output_message(message)?;
+        //mutex lock unwrap
         let result = self.network_controller.lock().unwrap().send(endpoint, &self.output_buffer);
         self.output_buffer.clear();
         if result.is_ok() {
             log::trace!("Message sent to {}", endpoint);
         }
-        result
+        Ok(result?)
     }
 
     /// Serialize and send the message thought the connections represented by the given endpoints.
@@ -209,12 +245,13 @@ impl<'a> NetworkManager {
         &mut self,
         endpoints: impl IntoIterator<Item = &'b Endpoint>,
         message: OutMessage,
-    ) -> Result<(), Vec<(Endpoint, io::Error)>>
+    ) -> Result<()>
     where
         OutMessage: Serialize,
     {
-        self.prepare_output_message(message);
+        self.prepare_output_message(message)?;
         let mut errors = Vec::new();
+        // mutex lock unwrap
         let mut controller = self.network_controller.lock().unwrap();
         for endpoint in endpoints {
             match controller.send(*endpoint, &self.output_buffer) {
@@ -227,21 +264,36 @@ impl<'a> NetworkManager {
             Ok(())
         }
         else {
-            Err(errors)
+            Err(SendAllError(errors).into())
         }
     }
 
-    fn prepare_output_message<OutMessage>(&mut self, message: OutMessage)
+    fn prepare_output_message<OutMessage>(&mut self, message: OutMessage) -> Result<()>
     where OutMessage: Serialize {
         encoding::encode(&mut self.output_buffer, |enconding_slot| {
-            bincode::serialize_into(enconding_slot, &message).unwrap();
-        });
+            bincode::serialize_into(enconding_slot, &message)
+                .context("failed to serialize message")?;
+            Ok(())
+        })
     }
 }
 
 impl Drop for NetworkManager {
+    //drop unwrap
     fn drop(&mut self) {
         self.network_thread_running.store(false, Ordering::Relaxed);
         self.network_event_thread.take().unwrap().join().unwrap();
     }
 }
+
+#[derive(Debug)]
+struct SendAllError(Vec<(network_adapter::Endpoint, io::Error)>);
+impl std::fmt::Display for SendAllError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        for (endpoint, error) in &self.0 {
+            writeln!(f, "failed to send data to endpoint {} with error: {}", endpoint, error)?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for SendAllError {}

@@ -1,18 +1,27 @@
 use std::collections::{HashMap, hash_map::Entry};
+use anyhow::{Result, Context};
+use std::convert::TryFrom;
 
 type Padding = u32;
 const PADDING: usize = std::mem::size_of::<Padding>();
 
 /// Prepare the buffer to encode data.
 /// The user should copy the data to the callback buffer in order to encode it.
-pub fn encode<C: Fn(&mut Vec<u8>)>(buffer: &mut Vec<u8>, encode_callback: C) {
+pub fn encode<C: Fn(&mut Vec<u8>) -> Result<()>>(
+    buffer: &mut Vec<u8>,
+    encode_callback: C,
+) -> Result<()>
+{
     let start_point = buffer.len();
     buffer.extend_from_slice(&[0; PADDING]); //Start serializing after PADDING
     let message_point = buffer.len();
-    encode_callback(buffer);
+    encode_callback(buffer)?;
     assert!(buffer.len() >= message_point, "Encoding must not decrement the buffer length");
-    let data_size = (buffer.len() - message_point) as Padding;
-    bincode::serialize_into(&mut buffer[start_point..start_point + PADDING], &data_size).unwrap();
+    let data_size = Padding::try_from(buffer.len() - message_point)
+        .context("data size larger than padding?")?;
+    bincode::serialize_into(&mut buffer[start_point..start_point + PADDING], &data_size)
+        .context("failed to serialize data size")?;
+    Ok(())
 }
 
 pub struct Decoder {
@@ -29,17 +38,17 @@ impl Decoder {
     /// The function returns the decoded data and the remaining data or `None`
     /// if more data is necessary to decode it.
     /// If this function returns None, a call to `decode()` is needed.
-    pub fn try_fast_decode(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    pub fn try_fast_decode(data: &[u8]) -> Result<Option<(&[u8], &[u8])>> {
         if data.len() >= PADDING {
-            let expected_size = bincode::deserialize::<Padding>(data).unwrap() as usize;
+            let expected_size = usize::try_from(bincode::deserialize::<Padding>(data)?)?;
             if data[PADDING..].len() >= expected_size {
-                return Some((
+                return Ok(Some((
                     &data[PADDING..PADDING + expected_size], // decoded data
                     &data[PADDING + expected_size..],        // next undecoded data
-                ))
+                )))
             }
         }
-        None
+        Ok(None)
     }
 
     /// Given data, it tries to decode it grouping several data slots if necessary.
@@ -47,7 +56,7 @@ impl Decoder {
     /// In the first place it returns the decoded data or `None`
     /// if it can not be decoded yet because it needs more data.
     /// In second place it retuns the remaing data.
-    pub fn decode<'a>(&mut self, data: &'a [u8]) -> (Option<&[u8]>, &'a [u8]) {
+    pub fn decode<'a>(&mut self, data: &'a [u8]) -> Result<(Option<&[u8]>, &'a [u8])> {
         let next_data = if let Some(expected_size) = self.expected_size {
             let pos = std::cmp::min(expected_size, data.len());
             self.decoded_data.extend_from_slice(&data[..pos]);
@@ -57,7 +66,7 @@ impl Decoder {
             let size_pos = std::cmp::min(PADDING - self.decoded_data.len(), PADDING);
             self.decoded_data.extend_from_slice(&data[..size_pos]);
             let expected_size =
-                bincode::deserialize::<Padding>(&self.decoded_data).unwrap() as usize;
+                usize::try_from(bincode::deserialize::<Padding>(&self.decoded_data)?)?;
             self.expected_size = Some(expected_size);
 
             let data = &data[size_pos..];
@@ -77,11 +86,11 @@ impl Decoder {
 
         if let Some(expected_size) = self.expected_size {
             if self.decoded_data.len() == expected_size + PADDING {
-                return (Some(&self.decoded_data[PADDING..]), next_data)
+                return Ok((Some(&self.decoded_data[PADDING..]), next_data))
             }
         }
 
-        (None, next_data)
+        Ok((None, next_data))
     }
 }
 
@@ -96,46 +105,51 @@ where E: std::hash::Hash + Eq
         DecodingPool { decoders: HashMap::new() }
     }
 
-    pub fn decode_from<C: FnMut(&[u8])>(
+    pub fn decode_from<C: FnMut(&[u8]) -> Result<()>>(
         &mut self,
         data: &[u8],
         identifier: E,
         mut decode_callback: C,
-    )
+    ) -> Result<()>
     {
         match self.decoders.entry(identifier) {
             Entry::Vacant(entry) => {
-                if let Some(decoder) = Self::fast_decode(data, decode_callback) {
+                if let Some(decoder) = Self::fast_decode(data, decode_callback)? {
                     entry.insert(decoder);
                 }
             }
             Entry::Occupied(mut entry) => {
-                let (decoded_data, next_data) = entry.get_mut().decode(data);
+                let (decoded_data, next_data) = entry.get_mut().decode(data)?;
                 if let Some(decoded_data) = decoded_data {
-                    decode_callback(decoded_data);
-                    match Self::fast_decode(next_data, decode_callback) {
+                    decode_callback(decoded_data)?;
+                    match Self::fast_decode(next_data, decode_callback)? {
                         Some(decoder) => entry.insert(decoder),
                         None => entry.remove(),
                     };
                 }
             }
         }
+        Ok(())
     }
 
-    fn fast_decode<C: FnMut(&[u8])>(data: &[u8], mut decode_callback: C) -> Option<Decoder> {
+    fn fast_decode<C: FnMut(&[u8]) -> Result<()>>(
+        data: &[u8],
+        mut decode_callback: C,
+    ) -> Result<Option<Decoder>>
+    {
         let mut next_data = data;
         loop {
-            if let Some((decoded_data, reminder_data)) = Decoder::try_fast_decode(next_data) {
-                decode_callback(decoded_data);
+            if let Some((decoded_data, reminder_data)) = Decoder::try_fast_decode(next_data)? {
+                decode_callback(decoded_data)?;
                 if reminder_data.is_empty() {
-                    return None
+                    return Ok(None)
                 }
                 next_data = reminder_data;
             }
             else {
                 let mut decoder = Decoder::new();
-                decoder.decode(next_data); // It will not be ready with the reminder data. We safe it and wait the next data.
-                return Some(decoder)
+                decoder.decode(next_data)?; // It will not be ready with the reminder data. We safe it and wait the next data.
+                return Ok(Some(decoder))
             }
         }
     }
@@ -152,7 +166,9 @@ mod tests {
     fn encode_message(buffer: &mut Vec<u8>) {
         super::encode(buffer, |slot| {
             slot.extend_from_slice(&MESSAGE);
-        });
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -171,7 +187,7 @@ mod tests {
         let mut buffer = Vec::new();
         encode_message(&mut buffer);
 
-        let (decoded_data, next_data) = Decoder::try_fast_decode(&buffer).unwrap();
+        let (decoded_data, next_data) = Decoder::try_fast_decode(&buffer).unwrap().unwrap();
         assert_eq!(next_data.len(), 0);
         assert_eq!(decoded_data, &MESSAGE);
     }
@@ -182,7 +198,7 @@ mod tests {
         encode_message(&mut buffer);
 
         let mut decoder = Decoder::new();
-        let (decoded_data, next_data) = decoder.decode(&buffer);
+        let (decoded_data, next_data) = decoder.decode(&buffer).unwrap();
         let decoded_data = decoded_data.unwrap();
         assert_eq!(next_data.len(), 0);
         assert_eq!(decoded_data, &MESSAGE);
@@ -201,7 +217,9 @@ mod tests {
         let mut next_data = &buffer[..];
         loop {
             message_index += 1;
-            if let Some((decoded_data, reminder_data)) = Decoder::try_fast_decode(next_data) {
+            if let Some((decoded_data, reminder_data)) =
+                Decoder::try_fast_decode(next_data).unwrap()
+            {
                 println!("{}", message_index);
                 assert_eq!(
                     reminder_data.len(),
@@ -225,11 +243,11 @@ mod tests {
         let mut decoder = Decoder::new();
         let (first, second) = buffer.split_at(MESSAGE_SIZE / 2);
 
-        let (decoded_data, next_data) = decoder.decode(&first);
+        let (decoded_data, next_data) = decoder.decode(&first).unwrap();
         assert!(decoded_data.is_none());
         assert_eq!(next_data.len(), 0);
 
-        let (decoded_data, next_data) = decoder.decode(&second);
+        let (decoded_data, next_data) = decoder.decode(&second).unwrap();
         let decoded_data = decoded_data.unwrap();
         assert_eq!(next_data.len(), 0);
         assert_eq!(decoded_data, &MESSAGE);

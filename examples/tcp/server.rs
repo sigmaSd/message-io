@@ -18,7 +18,8 @@ pub fn run() {
 
     let network_sender = event_queue.sender().clone();
     let mut network =
-        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)));
+        NetworkManager::new(move |net_event| network_sender.send(Event::Network(net_event)))
+            .unwrap();
 
     let mut clients: HashMap<Endpoint, ClientInfo> = HashMap::new();
 
@@ -29,7 +30,7 @@ pub fn run() {
     }
 
     loop {
-        match event_queue.receive() {
+        match event_queue.receive().unwrap() {
             Event::Network(net_event) => match net_event {
                 NetEvent::Message(endpoint, message) => match message {
                     Message::Greetings(text) => {

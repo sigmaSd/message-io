@@ -25,7 +25,7 @@ fn main() {
 
     // Create NetworkManager, the callback will push the network event into the event queue
     let sender = event_queue.sender().clone();
-    let mut network = NetworkManager::new(move |net_event| sender.send(Event::Network(net_event)));
+    let mut network = NetworkManager::new(move |net_event| sender.send(Event::Network(net_event))).unwrap();
 
     // Listen from TCP and UDP messages on ports 3005.
     let addr = "0.0.0.0:3005";
@@ -33,14 +33,14 @@ fn main() {
     network.listen_udp(addr).unwrap();
 
     loop {
-        match event_queue.receive() { // Read the next event or wait until have it.
+        match event_queue.receive().unwrap() {
+            // Read the next event or wait until have it.
             Event::Network(net_event) => match net_event {
                 NetEvent::Message(endpoint, message) => match message {
                     InputMessage::HelloServer(msg) => {
                         println!("Received: {}", msg);
                         network.send(endpoint, OutputMessage::HelloClient(msg)).unwrap();
-                    },
-                    //Other input messages here
+                    } //Other input messages here
                 },
                 NetEvent::AddedEndpoint(_endpoint) => println!("TCP Client connected"),
                 NetEvent::RemovedEndpoint(_endpoint) => println!("TCP Client disconnected"),

@@ -87,7 +87,7 @@ fn main() {
 
     // Create NetworkManager, the callback will push the network event into the event queue
     let sender = event_queue.sender().clone();
-    let mut network = NetworkManager::new(move |net_event| sender.send(Event::Network(net_event)));
+    let mut network = NetworkManager::new(move |net_event| sender.send(Event::Network(net_event))).unwrap();
 
     // Listen from TCP and UDP messages on ports 3005.
     let addr = "0.0.0.0:3005";
